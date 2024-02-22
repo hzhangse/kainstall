@@ -193,11 +193,19 @@ function utils::download_file() {
   log::info "[download]" "${filename}"
   command::exec "${MGMT_NODE}" "
     set -e
+    [ -f /etc/os-release ] && source /etc/os-release
+    local host_os=${ID:-}
+    local install_cmd=""
+    if [[ "${host_os}" == "ubuntu" ]]; then
+      install_cmd="apt-get"
+    elif [[ "${host_os}" == "centos" ]]; then
+      install_cmd="yum"
+    fi
     if [ ! -f \"${dest}\" ]; then
       [ ! -d \"${dest_dirname}\" ] && mkdir -pv \"${dest_dirname}\" 
       wget --timeout=10 --waitretry=3 --tries=5 --retry-connrefused --no-check-certificate \"${url}\" -O \"${dest}\"
       if [[ \"${unzip_tag}\" == \"unzip\" ]]; then
-        command -v unzip 2>/dev/null || apt-get install -y unzip
+        command -v unzip 2>/dev/null || ${install_cmd} install -y unzip
         unzip -o \"${dest}\" -d \"${dest_dirname}\"
       fi
     else
@@ -302,10 +310,13 @@ function command::scp() {
 
 function script::init_node() {
   # 节点初始化脚本
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
 
   # clean
   sed -i -e "/$KUBE_APISERVER/d" -e '/-worker-/d' -e '/-master-/d' /etc/hosts
-  sed -i '/## Kainstall managed start/,/## Kainstall managed end/d' /etc/security/limits.conf /etc/systemd/system.conf ~/.bashrc /etc/audit/rules.d/audit.rules
+  sed -i '/## Kainstall managed start/,/## Kainstall managed end/d' /etc/security/limits.conf /etc/systemd/system.conf ~/.bashrc /etc/bashrc /etc/rc.local /etc/audit/rules.d/audit.rules
 
   # Disable selinux
   sed -i '/SELINUX/s/enforcing/disabled/' /etc/selinux/config
@@ -316,16 +327,18 @@ function script::init_node() {
   sed -ri '/^[^#]*swap/s@^@#@' /etc/fstab
 
   # Disable firewalld
-  for target in firewalld iptables ufw; do
+  for target in firewalld iptables ufw python-firewall firewalld-filesystem; do
     systemctl stop $target &>/dev/null || true
     systemctl disable $target &>/dev/null || true
   done
 
   # repo
-  local codename
-  codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
-  [[ "${SKIP_SET_OS_REPO,,}" == "false" ]] && cp -fv /etc/apt/sources.list{,.bak}
-  [[ "${SKIP_SET_OS_REPO,,}" == "false" ]] && cat <<EOF >/etc/apt/sources.list
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    local codename
+    codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
+    [[ "${SKIP_SET_OS_REPO,,}" == "false" ]] && cp -fv /etc/apt/sources.list{,.bak}
+    [[ "${SKIP_SET_OS_REPO,,}" == "false" ]] && cat <<EOF >/etc/apt/sources.list
 deb http://mirrors.aliyun.com/ubuntu/ ${codename} main restricted universe multiverse
 deb http://mirrors.aliyun.com/ubuntu/ ${codename}-security main restricted universe multiverse
 deb http://mirrors.aliyun.com/ubuntu/ ${codename}-updates main restricted universe multiverse
@@ -335,21 +348,39 @@ deb-src http://mirrors.aliyun.com/ubuntu/ ${codename}-security main restricted u
 deb-src http://mirrors.aliyun.com/ubuntu/ ${codename}-updates main restricted universe multiverse
 deb-src http://mirrors.aliyun.com/ubuntu/ ${codename}-proposed main restricted universe multiverse
 EOF
-  apt update
+    apt update
 
-  echo -e '#!/bin/sh\nexit 101' | install -m 755 /dev/stdin /usr/sbin/policy-rc.d
+    echo -e '#!/bin/sh\nexit 101' | install -m 755 /dev/stdin /usr/sbin/policy-rc.d
 
-  systemctl mask apt-daily.service apt-daily-upgrade.service
-  systemctl stop apt-daily.timer apt-daily-upgrade.timer
-  systemctl disable apt-daily.timer apt-daily-upgrade.timer
-  systemctl kill --kill-who=all apt-daily.service
+    systemctl mask apt-daily.service apt-daily-upgrade.service
+    systemctl stop apt-daily.timer apt-daily-upgrade.timer
+    systemctl disable apt-daily.timer apt-daily-upgrade.timer
+    systemctl kill --kill-who=all apt-daily.service
 
-  cat <<EOF >/etc/apt/apt.conf.d/10cloudinit-disable
+    cat <<EOF >/etc/apt/apt.conf.d/10cloudinit-disable
 APT::Periodic::Enable "0";
 // undo what's in 20auto-upgrade
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    [[ -f /etc/yum.repos.d/CentOS-Base.repo && "${SKIP_SET_OS_REPO,,}" == "false" ]] && sed -e 's!^#baseurl=!baseurl=!g' \
+      -e 's!^mirrorlist=!#mirrorlist=!g' \
+      -e 's!mirror.centos.org!mirrors.aliyun.com!g' \
+      -i /etc/yum.repos.d/CentOS-Base.repo
+
+    [[ "${OFFLINE_TAG:-}" != "1" && "${SKIP_SET_OS_REPO,,}" == "false" ]] && yum install -y epel-release
+
+    [[ -f /etc/yum.repos.d/epel.repo && "${SKIP_SET_OS_REPO,,}" == "false" ]] && sed -e 's!^mirrorlist=!#mirrorlist=!g' \
+      -e 's!^metalink=!#metalink=!g' \
+      -e 's!^#baseurl=!baseurl=!g' \
+      -e 's!//download.*/pub!//mirrors.aliyun.com!g' \
+      -e 's!http://mirrors\.aliyun!https://mirrors.aliyun!g' \
+      -i /etc/yum.repos.d/epel.repo
+
+    yum clean all
+  fi
 
   # Change limits
   [ ! -f /etc/security/limits.conf_bak ] && cp /etc/security/limits.conf{,_bak}
@@ -634,6 +665,23 @@ export HISTFILESIZE HISTSIZE HISTTIMEFORMAT
 PS1='\[\033[0m\]\[\033[1;36m\][\u\[\033[0m\]@\[\033[1;32m\]\h\[\033[0m\] \[\033[1;31m\]\w\[\033[0m\]\[\033[1;36m\]]\[\033[33;1m\]\\$ \[\033[0m\]'
 ## Kainstall managed end
 EOF
+  cat <<EOF >>/etc/bashrc
+## Kainstall managed start
+# history actions record，include action time, user, login ip
+HISTFILESIZE=5000
+HISTSIZE=5000
+USER_IP=\$(who -u am i 2>/dev/null | awk '{print \$NF}' | sed -e 's/[()]//g')
+if [ -z \$USER_IP ]
+then
+  USER_IP=\$(hostname -i)
+fi
+HISTTIMEFORMAT="%Y-%m-%d %H:%M:%S \$USER_IP:\$(whoami) "
+export HISTFILESIZE HISTSIZE HISTTIMEFORMAT
+
+# PS1
+PS1='\[\033[0m\]\[\033[1;36m\][\u\[\033[0m\]@\[\033[1;32m\]\h\[\033[0m\] \[\033[1;31m\]\w\[\033[0m\]\[\033[1;36m\]]\[\033[33;1m\]\\$ \[\033[0m\]'
+## Kainstall managed end
+EOF
 
   # journal
   mkdir -p /var/log/journal /etc/systemd/journald.conf.d
@@ -769,8 +817,8 @@ EOF
   echo 'ALL ALL=(ALL) NOPASSWD:/usr/bin/crictl' >/etc/sudoers.d/crictl
 
   # time sync
-  ntpd --help >/dev/null 2>&1 && apt-get remove -y ntp
-  [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y chrony
+  ntpd --help >/dev/null 2>&1 && ${install_cmd} remove -y ntp
+  [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y chrony
   [ ! -f /etc/chrony.conf_bak ] && cp /etc/chrony.conf{,_bak} #备份默认配置
   cat <<EOF >/etc/chrony.conf
 server ntp.aliyun.com iburst
@@ -788,17 +836,27 @@ EOF
 
   timedatectl set-timezone Asia/Shanghai
   chronyd -q -t 1 'server cn.pool.ntp.org iburst maxsamples 1'
-  systemctl enable chrony
-  systemctl start chrony
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    systemctl enable chrony
+    systemctl start chrony
+  elif [[ "${host_os}" == "centos" ]]; then
+    systemctl enable chronyd
+    systemctl start chronyd
+  fi
+
   chronyc sources -v
   chronyc sourcestats
   hwclock --systohc
 
   # package
-  [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y apt-transport-https ca-certificates curl wget gnupg lsb-release
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y apt-transport-https ca-certificates curl wget gnupg lsb-release
+  elif [[ "${host_os}" == "centos" ]]; then
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y curl wget
+  fi
 
   # ipvs
-  [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y ipvsadm ipset sysstat conntrack libseccomp2
+  [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y ipvsadm ipset sysstat conntrack libseccomp2
   module=(
     ip_vs
     ip_vs_rr
@@ -817,7 +875,12 @@ EOF
   sysctl --system
 
   # audit
-  [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y auditd audispd-plugins
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y auditd audispd-plugins
+  elif [[ "${host_os}" == "centos" ]]; then
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && yum install -y audit audit-libs
+  fi
+
   cat <<EOF >>/etc/audit/rules.d/audit.rules
 ## Kainstall managed start
 # Ignore errors
@@ -876,14 +939,34 @@ EOF
 
 function script::upgrade_kernel() {
   # 升级内核
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
 
-  local codename
-  codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    local codename
+    codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
 
-  if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    echo "deb [trusted=yes] http://mirrors.aliyun.com/ubuntu ${codename}-backports main" >/etc/apt/sources.list.d/backports.list
-    apt update
-    apt -t "${codename}-backports" install linux-headers-generic linux-image-generic -y
+    if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
+      echo "deb [trusted=yes] http://mirrors.aliyun.com/ubuntu ${codename}-backports main" >/etc/apt/sources.list.d/backports.list
+      apt update
+      apt -t "${codename}-backports" install linux-headers-generic linux-image-generic -y
+    fi
+  elif [[ "${host_os}" == "centos" ]]; then
+    local ver
+    ver=$(rpm --eval "%{centos_ver}")
+
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && yum install -y "https://www.elrepo.org/elrepo-release-${ver}.el${ver}.elrepo.noarch.rpm"
+    sed -e "s/^mirrorlist=/#mirrorlist=/g" \
+      -e "s/elrepo.org\/linux/mirrors.tuna.tsinghua.edu.cn\/elrepo/g" \
+      -i /etc/yum.repos.d/elrepo.repo
+
+    if ! command -v perl; then yum install -y perl; fi
+    [[ "${OFFLINE_TAG:-}" != "1" ]] && if ! yum install -y --disablerepo="*" --enablerepo=elrepo-kernel kernel-ml{,-devel}; then exit 1; fi
+
+    grub2-set-default 0 && grub2-mkconfig -o /etc/grub2.cfg
+    grubby --default-kernel
+    grubby --args="cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory user_namespace.enable=1" --update-kernel="$(grubby --default-kernel)"
   fi
 }
 
@@ -933,10 +1016,21 @@ function script::upgrage_kube() {
   set -e
   echo '[install] kubeadm'
   kubeadm version
-  echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-  apt-get update
-  [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
-  apt-get install -y "kubeadm"
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
+
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
+    apt-get update
+    [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
+    apt-get install -y "kubeadm"
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    yum install -y "kubeadm${version}" --disableexcludes=kubernetes
+  fi
+
   kubeadm version
 
   echo '[upgrade]'
@@ -953,7 +1047,13 @@ function script::upgrage_kube() {
 
   echo '[install] kubelet kubectl'
   kubectl version --client=true
-  apt-get install -y "kubelet" "kubectl" "kubernetes-cni"
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    apt-get install -y "kubelet" "kubectl" "kubernetes-cni"
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    yum install -y "kubelet" "kubectl" "kubernetes-cni" --disableexcludes=kubernetes
+  fi
+
   kubectl version --client=true
 
   [ -f /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf ] &&
@@ -968,20 +1068,37 @@ function script::install_docker() {
 
   local version="=${1:-latest}-00"
   version="${version#=latest-00}"
-
-  #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
-  #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
-  curl -fsSL https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu/gpg | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/huawei.gpg --import
-  chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
-  sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
-  apt-get update
-
-  if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which docker)" ] && apt remove -y docker-ce docker-ce-cli containerd.io
-    apt-get install -y "docker-ce${version}" "docker-ce-cli${version}" containerd.io bash-completion
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
+    #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
+    curl -fsSL https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu/gpg | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/huawei.gpg --import
+    chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
+    sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
+    ${install_cmd} update
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    cat <<EOF >/etc/yum.repos.d/docker-ce.repo
+[docker-ce-stable]
+name=Docker CE Stable - \$basearch
+baseurl=https://mirrors.aliyun.com/docker-ce/linux/centos/$(rpm --eval '%{centos_ver}')/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
+EOF
   fi
 
-  apt-mark hold docker-ce docker-ce-cli containerd.io
+  if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
+    [ -f "$(which docker)" ] && ${install_cmd} remove -y docker-ce docker-ce-cli containerd.io
+    ${install_cmd} install -y "docker-ce${version}" "docker-ce-cli${version}" containerd.io bash-completion
+  fi
+
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    apt-mark hold docker-ce docker-ce-cli containerd.io
+  fi
 
   [ -f /usr/share/bash-completion/completions/docker ] &&
     cp -f /usr/share/bash-completion/completions/docker /etc/bash_completion.d/
@@ -1039,17 +1156,34 @@ function script::install_containerd() {
   local version="=${1:-latest}-00"
   version="${version#=latest-00}"
 
-  #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
-  #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
-  curl -fsSL https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu/gpg | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/huawei.gpg --import
-  chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
-  sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
-  apt-get update
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
+
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
+    #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
+    curl -fsSL https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu/gpg | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/huawei.gpg --import
+    chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
+    sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
+    ${install_cmd} update
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    cat <<EOF >/etc/yum.repos.d/docker-ce.repo
+[docker-ce-stable]
+name=Docker CE Stable - \$basearch
+baseurl=https://mirrors.aliyun.com/docker-ce/linux/centos/$(rpm --eval '%{centos_ver}')/\$basearch/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
+EOF
+  fi
 
   if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which runc)" ] && apt remove -y runc
-    [ -f "$(which containerd)" ] && apt remove -y containerd.io
-    apt-get install -y containerd.io"${version}" bash-completion
+    [ -f "$(which runc)" ] && ${install_cmd} remove -y runc
+    [ -f "$(which containerd)" ] && ${install_cmd} remove -y containerd.io
+    ${install_cmd} install -y containerd.io"${version}" containernetworking bash-completion
   fi
 
   [ -d /etc/bash_completion.d ] && crictl completion bash >/etc/bash_completion.d/crictl
@@ -1084,21 +1218,53 @@ function script::install_cri-o() {
 
   local version="${1:-latest}"
   version="${version##latest}"
-  os="xUbuntu_$(lsb_release -rs)"
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
 
-  echo "deb [trusted=yes] http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$os/ /" >/etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
-  echo "deb [trusted=yes] http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$version/${os}/ /" >"/etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$version.list"
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    os="xUbuntu_$(lsb_release -rs)"
 
-  wget -qO - "https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$version/${os}/Release.key" | apt-key add -
-  wget -qO - "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$os/Release.key" | apt-key add -
+    echo "deb [trusted=yes] http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$os/ /" >/etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+    echo "deb [trusted=yes] http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$version/${os}/ /" >"/etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:$version.list"
 
-  apt-get update
+    wget -qO - "https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$version/${os}/Release.key" | apt-key add -
+    wget -qO - "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$os/Release.key" | apt-key add -
+
+    apt-get update
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    os="CentOS_$(rpm --eval '%{centos_ver}')" && echo "${os}"
+
+    cat <<EOF >/etc/yum.repos.d/devel_kubic_libcontainers_stable.repo
+[devel_kubic_libcontainers_stable]
+name=Stable Releases of Upstream github.com/containers packages
+type=rpm-md
+baseurl=https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/${os}/
+gpgcheck=1
+gpgkey=https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/${os}/repodata/repomd.xml.key
+enabled=1
+
+[devel_kubic_libcontainers_stable_cri-o]
+name=devel:kubic:libcontainers:stable:cri-o
+type=rpm-md
+baseurl=https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/${version}/${os}/
+gpgcheck=1
+gpgkey=https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/${version}/${os}/repodata/repomd.xml.key
+enabled=1
+EOF
+  fi
 
   if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which runc)" ] && apt remove -y runc
-    [ -f "$(which crio)" ] && apt remove -y cri-o
-    [ -f "$(which docker)" ] && apt remove -y docker-ce docker-ce-cli containerd.io
-    apt-get install -y cri-o runc bash-completion
+    [ -f "$(which runc)" ] && ${install_cmd} remove -y runc
+    [ -f "$(which crio)" ] && ${install_cmd} remove -y cri-o
+    [ -f "$(which docker)" ] && ${install_cmd} remove -y docker-ce docker-ce-cli containerd.io
+    if [[ "${host_os}" == "ubuntu" ]]; then
+      ${install_cmd} install -y cri-o runc bash-completion
+    elif [[ "${host_os}" == "centos" ]]; then
+      ${install_cmd} install -y runc cri-o bash-completion --disablerepo=docker-ce-stable || if ! yum install -y runc cri-o bash-completion; then exit 1; fi
+    fi
   fi
 
   [ -d /etc/bash_completion.d ] &&
@@ -1159,15 +1325,38 @@ function script::install_kube() {
   repo="${version%-*}"
   repo="${repo//=/}"
   [ "${repo}" == "" ] && repo="1.29"
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
 
-  echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-  apt-get update
-
-  if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
-    [ -f "$(which kubelet)" ] && apt remove -y kubelet
-    [ -f "$(which kubectl)" ] && apt remove -y kubectl
-    apt-get install -y "kubeadm" "kubelet" "kubectl" kubernetes-cni
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+    echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
+    apt-get update
+    if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
+      [ -f "$(which kubeadm)" ] && ${install_cmd} remove -y kubeadm
+      [ -f "$(which kubelet)" ] && ${install_cmd} remove -y kubelet
+      [ -f "$(which kubectl)" ] && ${install_cmd} remove -y kubectl
+      ${install_cmd} install -y "kubeadm" "kubelet" "kubectl" kubernetes-cni
+      apt-mark hold kubelet kubeadm kubectl
+    fi
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    cat <<EOF >/etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v${repo}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${repo}/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
+    if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
+      [ -f /usr/bin/kubeadm ] && yum remove -y kubeadm
+      [ -f /usr/bin/kubelet ] && yum remove -y kubelet
+      [ -f /usr/bin/kubectl ] && yum remove -y kubectl
+      yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+    fi
   fi
 
   #script::install_kube_component ${repo}
@@ -1195,12 +1384,22 @@ EOF
 
 function script::install_haproxy() {
   # 安装haproxy
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
+
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+  fi
 
   local api_servers="$*"
 
   if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which haproxy)" ] && apt remove -y haproxy
-    apt-get install -y haproxy rsyslog
+    [ -f "$(which haproxy)" ] && ${install_cmd} remove -y haproxy
+    ${install_cmd} install -y haproxy rsyslog
   fi
 
   [ ! -f /etc/haproxy/haproxy.cfg_bak ] && cp /etc/haproxy/haproxy.cfg{,_bak}
@@ -1262,13 +1461,23 @@ function check::command_exists() {
 
   local cmd=${1}
   local package=${2}
+  [ -f /etc/os-release ] && source /etc/os-release
+  local host_os=${ID:-}
+  local install_cmd=""
+
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt-get"
+
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+  fi
 
   if command -V "$cmd" >/dev/null 2>&1; then
     log::info "[check]" "$cmd command exists."
   else
     log::warning "[check]" "I require $cmd but it's not installed."
     log::warning "[check]" "install $package package."
-    command::exec "127.0.0.1" "apt-get install -y ${package}"
+    command::exec "127.0.0.1" "${install_cmd} install -y ${package}"
     check::exit_code "$?" "check" "$package install" "exit"
   fi
 }
@@ -1312,11 +1521,15 @@ function check::os() {
 function get::os() {
   # 检查os系统支持
   local host=${1:-}
-
-  command::exec "${host}" "
-      [ -f /etc/os-release ] && source /etc/os-release
-      echo \${ID:-}
-    "
+  if [[ "${host}"!="" ]]; then
+    command::exec "${host}" "
+        [ -f /etc/os-release ] && source /etc/os-release
+        echo \${ID:-}
+      "
+  else
+    [ -f /etc/os-release ] && source /etc/os-release
+    echo ${ID:-}
+  fi
 }
 
 function check::kernel() {
@@ -1412,7 +1625,7 @@ function install::package() {
     command::exec "${host}" "
       export OFFLINE_TAG=${OFFLINE_TAG:-0}
       $(declare -f script::install_"${KUBE_CRI}")
-      script::install_${KUBE_CRI} $KUBE_CRI_VERSION
+      script::install_${KUBE_CRI} $KUBE_CRI_VERSION 
     "
     check::exit_code "$?" "install" "install ${KUBE_CRI} on $host"
 
@@ -3124,7 +3337,18 @@ function add::storage() {
     for host in ${cluster_nodes:-}; do
       log::info "[storage]" "${host}: install iscsi-initiator-utils"
       command::exec "${host}" "
-        apt-get install -y open-iscsi
+          [ -f /etc/os-release ] && source /etc/os-release   
+          local host_os=${ID:-}
+          local install_cmd=""
+
+          if [[ "${host_os}" == "ubuntu" ]]; then
+            install_cmd="apt-get"
+            apt-get install -y open-iscsi
+          elif [[ "${host_os}" == "centos" ]]; then
+            install_cmd="yum"
+            yum install -y iscsi-initiator-utils
+          fi
+          apt-get install -y open-iscsi
       "
       check::exit_code "$?" "storage" "${host}: install iscsi-initiator-utils" "exit"
     done
@@ -3246,7 +3470,7 @@ $(
       log::access "[ingress]" "curl --insecure -H 'Host:kubernetes-dashboard.cluster.local' https://${INGRESS_CONN}"
 
       command::exec "${MGMT_NODE}" "
-        kubectl create serviceaccount kubernetes-dashboard-admin-sa -n kubernetes-dashboard
+        kubectl create serviceaccount kubernetes-dashboard-admin-sa -n kubernetes-dashboard  --dry-run -o yaml | kubectl apply -f -
         kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Secret
@@ -3257,7 +3481,7 @@ metadata:
     kubernetes.io/service-account.name: kubernetes-dashboard-admin-sa
 type: kubernetes.io/service-account-token
 EOF
-        kubectl create clusterrolebinding kubernetes-dashboard-admin-sa --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:kubernetes-dashboard-admin-sa -n kubernetes-dashboard
+        kubectl create clusterrolebinding kubernetes-dashboard-admin-sa --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:kubernetes-dashboard-admin-sa -n kubernetes-dashboard   --dry-run -o yaml | kubectl apply -f -
       "
       local s="$?"
       check::exit_code "$s" "ui" "create kubernetes dashboard admin service account"
@@ -3438,18 +3662,57 @@ spec:
 
 function reset::node() {
   # 重置节点
-
   local host=$1
   get::os $host
   local host_os="$COMMAND_OUTPUT"
+  local install_cmd=""
+  local remove_repo_script=""
   log::info "[reset]" "node $host,os:$host_os"
-
-  command::scp "${host}" "./kainstall-${host_os}.sh" /
-  command::exec "${host}" "
-    chmod a+x /kainstall-${host_os}.sh
-    source /kainstall-${host_os}.sh
-    reset::node 
+  if [[ "${host_os}" == "ubuntu" ]]; then
+    install_cmd="apt"
+    remove_repo_script="
     "
+  elif [[ "${host_os}" == "centos" ]]; then
+    install_cmd="yum"
+    remove_repo_script="
+    for repo in kubernetes.repo docker-ce.repo devel_kubic_libcontainers_stable.repo
+    do
+      [ -f /etc/yum.repos.d/\${repo} ] && rm -f /etc/yum.repos.d/\${repo}
+    done
+    "
+  fi
+
+  local reset_script="
+    set +ex
+    cri_socket=\"\"
+    [ -S /var/run/crio/crio.sock ] && cri_socket=\"--cri-socket /var/run/crio/crio.sock\"
+    [ -S /run/containerd/containerd.sock ] && cri_socket=\"--cri-socket /run/containerd/containerd.sock\"
+    kubeadm reset -f \$cri_socket
+    [ -f \"\$(which kubelet)\" ] && { systemctl stop kubelet; find /var/lib/kubelet | xargs -n 1 findmnt -n -o TARGET -T | sort | uniq | xargs -r umount -v; ${install_cmd} remove -y kubeadm kubelet kubectl; }
+    [ -d /etc/kubernetes ] && rm -rf /etc/kubernetes/* /var/lib/kubelet/* /var/lib/etcd/* \$HOME/.kube /etc/cni/net.d/* /var/lib/dockershim/* /var/lib/cni/* /var/run/kubernetes/*
+
+    [ -f \"\$(which docker)\" ] && { docker rm -f -v \$(docker ps | grep kube | awk '{print \$1}'); systemctl stop docker; rm -rf \$HOME/.docker /etc/docker/* /var/lib/docker/*; ${install_cmd} remove -y docker; }
+    [ -f \"\$(which containerd)\" ] && { crictl rm \$(crictl ps -a -q); systemctl stop containerd; rm -rf /etc/containerd/* /var/lib/containerd/*; ${install_cmd} remove -y containerd.io; }
+    [ -f \"\$(which crio)\" ] && { crictl rm \$(crictl ps -a -q); systemctl stop crio; rm -rf /etc/crictl.yaml /etc/crio/* /var/run/crio/*;  ${install_cmd} remove -y cri-o; }
+    [ -f \"\$(which runc)\" ] && { find /run/containers/ /var/lib/containers/ | xargs -n 1 findmnt -n -o TARGET -T | sort | uniq | xargs -r umount -v; rm -rf /var/lib/containers/* /var/run/containers/*;  ${install_cmd} remove -y runc; }
+    [ -f \"\$(which haproxy)\" ] && { systemctl stop haproxy; rm -rf /etc/haproxy/* /etc/rsyslog.d/haproxy.conf; ${install_cmd} remove -y haproxy; }
+
+    sed -i -e \"/$KUBE_APISERVER/d\" -e '/-worker-/d' -e '/-master-/d' /etc/hosts
+    sed -i '/## Kainstall managed start/,/## Kainstall managed end/d' /etc/security/limits.conf /etc/systemd/system.conf ~/.bashrc /etc/bashrc /etc/rc.local /etc/audit/rules.d/audit.rules
+    [ -d /var/lib/elasticsearch ] && rm -rf /var/lib/elasticsearch/*
+    [ -d /var/lib/longhorn ] &&  rm -rf /var/lib/longhorn/*
+    [ -d \"${OFFLINE_DIR:-/tmp/abc}\" ] && rm -rf \"${OFFLINE_DIR:-/tmp/abc}\"
+    ${remove_repo_script}
+    ipvsadm --clear
+    iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+    for int in kube-ipvs0 cni0 docker0 dummy0 flannel.1 cilium_host cilium_net cilium_vxlan lxc_health nodelocaldns 
+    do
+      [ -d /sys/class/net/\${int} ] && ip link delete \${int}
+    done
+    modprobe -r ipip
+    echo done.
+  "
+  command::exec "${host}" "${reset_script}"
   check::exit_code "$?" "reset" "$host: reset"
 }
 
@@ -3510,7 +3773,19 @@ function offline::load() {
     fi
 
     log::info "[offline]" "${role} ${host}: install package"
-    command::exec "${host}" "dpkg --force-all -i ${OFFLINE_DIR}/*.deb; DEBIAN_FRONTEND=noninteractive apt-get install -f -q -y"
+    command::exec "${host}" "
+        [ -f /etc/os-release ] && source /etc/os-release   
+        local host_os=${ID:-}
+        local install_cmd=""
+
+        if [[ "${host_os}" == "ubuntu" ]]; then
+          install_cmd="apt-get"
+          dpkg --force-all -i ${OFFLINE_DIR}/*.deb; DEBIAN_FRONTEND=noninteractive apt-get install -f -q -y
+        elif [[ "${host_os}" == "centos" ]]; then
+          install_cmd="yum"
+          yum localinstall -y --skip-broken ${OFFLINE_DIR}/*.rpm
+        fi
+    "
     check::exit_code "$?" "offline" "${role} ${host}: install package" "exit"
 
     if [[ "${UPGRADE_KERNEL_TAG:-}" != "1" ]]; then
@@ -3752,9 +4027,9 @@ function update::self {
 
   log::info "[update]" "download kainstall script to $0"
   command::exec "127.0.0.1" "
-    wget --timeout=10 --waitretry=3 --tries=5 --retry-connrefused ${GITHUB_PROXY}https://raw.githubusercontent.com/lework/kainstall/master/kainstall-ubuntu.sh -O /tmp/kainstall-ubuntu.sh || exit 1
+    wget --timeout=10 --waitretry=3 --tries=5 --retry-connrefused ${GITHUB_PROXY}https://raw.githubusercontent.com/lework/kainstall/master/kainstall.sh -O /tmp/kainstall.sh || exit 1
     /bin/cp -fv $0 /tmp/$0-bakup
-    /bin/mv -fv /tmp/kainstall-ubuntu.sh \"$0\"
+    /bin/mv -fv /tmp/kainstall.sh \"$0\"
     chmod +x \"$0\"
   "
   check::exit_code "$?" "update" "kainstall script"

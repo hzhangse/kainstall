@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+ 
+        /*       
+        {
+            "type": "shell",
+            "request": "launch",
+            "name": "Launch",
+            "command": "echo",
+            "args": [
+                "Hello World"
+            ]
+        }, */
+
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "reset",
+            "program": "kainstall.sh",
+            "argsString": "resetbyhand --user root --password root123  --master 192.168.18.52   --version 1.28 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "init",
+            "program": "kainstall-ubuntu.sh",
+            "argsString": "init --master 192.168.18.52  --user root --password root123   --version 1.28 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        }
+    ]
+}
