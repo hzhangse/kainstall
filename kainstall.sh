@@ -86,7 +86,8 @@ GITHUB_PROXY="${GITHUB_PROXY:-https://mirror.ghproxy.com/}"
 GCR_PROXY="${GCR_PROXY:-k8sgcr.lework.workers.dev}"
 SKIP_UPGRADE_PLAN=${SKIP_UPGRADE_PLAN:-false}
 SKIP_SET_OS_REPO=${SKIP_SET_OS_REPO:-false}
-
+#ALIDNS_ACCESS_KEY=$(echo -n "XXXXXX"|base64)
+#ALIDNS_SECRET_KEY=$(echo -n "BBBBBB"|base64)
 SELF_DOMAIN_NAME="jemmell.com"
 trap trap::info 1 2 3 15 EXIT
 
