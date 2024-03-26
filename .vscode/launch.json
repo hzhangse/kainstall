@@ -21,16 +21,67 @@
             "request": "launch",
             "name": "reset",
             "program": "kainstall.sh",
-            "argsString": "resetbyhand --user root --password root123  --master 192.168.18.52   --version 1.28 "
+            "argsString": "resetbyhand  --master 192.168.1.71:JP@125.com --worker 192.168.1.72:JP@125.com,192.168.1.73:JP@125.com --user root --password root123  --version 1.26.15  "
             //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
         },
         {
             "type": "bashdb",
             "request": "launch",
             "name": "init",
-            "program": "kainstall-ubuntu.sh",
-            "argsString": "init --master 192.168.18.52  --user root --password root123   --version 1.28 "
+            "program": "kainstall.sh",
+            "argsString": "init --master 192.168.1.71:JP@125.com --worker 192.168.1.72:JP@125.com,192.168.1.73:JP@125.com --user root --password root123  --version 1.26.15 "
             //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
-        }
+        },
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "init master",
+            "program": "kainstall.sh",
+            "argsString": "init --master 192.168.18.52:root123  --offline-file /home/ryan/git/kainstall-offline --user root --password root123   --version 1.28.7 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "add network",
+            "program": "kainstall.sh",
+            "argsString": "add -n calico --master 192.168.18.52  --user root --password root123   --version 1.28 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "del node",
+            "program": "kainstall.sh",
+            "argsString": "del --worker 192.168.152.251:JP@125.com  --user root --password root123   --version 1.28.7 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "add worker node",
+            "program": "kainstall.sh",
+            "argsString": "add --worker 192.168.152.251:JP@125.com  --user root --password root123  --offline-file /home/ryan/git/kainstall-offline  --version 1.28.7 "
+        },
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "upgrade",
+            "program": "kainstall.sh",
+            "argsString": "upgrade --master 192.168.18.52:root123  --offline-file /home/ryan/git/kainstall-offline  --version 1.29.2 "
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+
+        {
+            "type": "bashdb",
+            "request": "launch",
+            "name": "add certmanager",
+            "program": "kainstall.sh",
+            "argsString": "add --addon aliyuncert --domain idc.jemmell.com"
+            //,"env": {"http_proxy":"http://192.168.1.6:7890","https_proxy":"http://192.168.1.6:7890"}
+        },
+       
+       
     ]
 }
