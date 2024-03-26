@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 ###################################################################
-#Script Name    : kainstall-ubuntu.sh
+#Script Name    : kainstall.sh
 #Description    : Install kubernetes cluster using kubeadm.
-#Create Date    : 2021-08-01
-#Author         : lework
-#Email          : lework@yeah.net
+#Create Date    : 2024-02-01
+#Author         : zhangse
+#Email          : rainbow954@163.com
 ###################################################################
 
 [[ -n $DEBUG ]] && set -x
@@ -20,7 +20,7 @@ set -o pipefail # Use last non-zero exit code in a pipeline
 KUBE_VERSION="${KUBE_VERSION:-latest}"
 FLANNEL_VERSION="${FLANNEL_VERSION:-0.24.0}"
 METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-0.6.4}"
-INGRESS_NGINX="${INGRESS_NGINX:-1.9.5}"
+INGRESS_NGINX="${INGRESS_NGINX:-1.10.0}"
 TRAEFIK_VERSION="${TRAEFIK_VERSION:-2.10.7}"
 CALICO_VERSION="${CALICO_VERSION:-3.27.0}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.14.5}"
@@ -30,7 +30,7 @@ ROOK_VERSION="${ROOK_VERSION:-1.9.13}"
 LONGHORN_VERSION="${LONGHORN_VERSION:-1.5.3}"
 KUBERNETES_DASHBOARD_VERSION="${KUBERNETES_DASHBOARD_VERSION:-2.7.0}"
 KUBESPHERE_VERSION="${KUBESPHERE_VERSION:-3.3.2}"
-
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-1.14.4}"
 # 集群配置
 KUBE_DNSDOMAIN="${KUBE_DNSDOMAIN:-cluster.local}"
 KUBE_APISERVER="${KUBE_APISERVER:-apiserver.$KUBE_DNSDOMAIN}"
@@ -52,9 +52,9 @@ KUBE_CRI_ENDPOINT="${KUBE_CRI_ENDPOINT:-unix:///run/containerd/containerd.sock}"
 # 定义的master和worker节点地址，以逗号分隔
 MASTER_NODES="${MASTER_NODES:-}"
 WORKER_NODES="${WORKER_NODES:-}"
-# 定义的master和worker节点IP:hostname，以逗号分隔
-#declare -A MASTER_NODES_MAP
-#declare -A WORKER_NODES_MAP
+# 定义的master和worker节点IP:RootPW，以逗号分隔
+declare -A MASTER_NODES_MAP
+declare -A WORKER_NODES_MAP
 RENAME_NODES="${RENAME_NODES:-}"
 
 # 定义在哪个节点上进行设置
@@ -87,6 +87,7 @@ GCR_PROXY="${GCR_PROXY:-k8sgcr.lework.workers.dev}"
 SKIP_UPGRADE_PLAN=${SKIP_UPGRADE_PLAN:-false}
 SKIP_SET_OS_REPO=${SKIP_SET_OS_REPO:-false}
 
+SELF_DOMAIN_NAME="jemmell.com"
 trap trap::info 1 2 3 15 EXIT
 
 ######################################################################################################
@@ -194,18 +195,18 @@ function utils::download_file() {
   command::exec "${MGMT_NODE}" "
     set -e
     [ -f /etc/os-release ] && source /etc/os-release
-    local host_os=${ID:-}
-    local install_cmd=""
-    if [[ "${host_os}" == "ubuntu" ]]; then
+    host_os=\${ID}
+    install_cmd=""
+    if [[ "\${host_os}" == *\"ubuntu\"* ]]; then
       install_cmd="apt-get"
-    elif [[ "${host_os}" == "centos" ]]; then
+    elif [[ "\${host_os}" == *\"centos\"* ]]; then
       install_cmd="yum"
     fi
     if [ ! -f \"${dest}\" ]; then
       [ ! -d \"${dest_dirname}\" ] && mkdir -pv \"${dest_dirname}\" 
       wget --timeout=10 --waitretry=3 --tries=5 --retry-connrefused --no-check-certificate \"${url}\" -O \"${dest}\"
       if [[ \"${unzip_tag}\" == \"unzip\" ]]; then
-        command -v unzip 2>/dev/null || ${install_cmd} install -y unzip
+        command -v unzip 2>/dev/null || \${install_cmd} install -y unzip
         unzip -o \"${dest}\" -d \"${dest_dirname}\"
       fi
     else
@@ -249,6 +250,15 @@ function command::exec() {
   fi
 
   command="$(utils::quote "$command")"
+
+  local LOCAL_SSH_PASSWORD=${MASTER_NODES_MAP[$host]:-}
+  if [[ "${LOCAL_SSH_PASSWORD}" == "" ]]; then
+    LOCAL_SSH_PASSWORD=${WORKER_NODES_MAP[$host]:-}
+  fi
+
+  if [[ "${LOCAL_SSH_PASSWORD}" != "" ]]; then
+    SSH_PASSWORD=${LOCAL_SSH_PASSWORD:-}
+  fi
 
   if [[ "${host}" == "127.0.0.1" ]]; then
     # 本地执行
@@ -333,7 +343,7 @@ function script::init_node() {
   done
 
   # repo
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     local codename
     codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
@@ -363,7 +373,7 @@ APT::Periodic::Enable "0";
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     [[ -f /etc/yum.repos.d/CentOS-Base.repo && "${SKIP_SET_OS_REPO,,}" == "false" ]] && sed -e 's!^#baseurl=!baseurl=!g' \
       -e 's!^mirrorlist=!#mirrorlist=!g' \
@@ -709,8 +719,8 @@ EOF
   cat <<EOF >/etc/profile.d/zz-ssh-login-info.sh
 #!/bin/sh
 #
-# @Time    : 2020-02-04
-# @Author  : lework
+# @Time    : 2024-03-25
+# @Author  : ryan zhang
 # @Desc    : ssh login banner
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH
@@ -721,7 +731,7 @@ echo -e "\033[0;32m
  █████╔╝ ╚█████╔╝███████╗
  ██╔═██╗ ██╔══██╗╚════██║
  ██║  ██╗╚█████╔╝███████║
- ╚═╝  ╚═╝ ╚════╝ ╚══════ by kainstall\033[0m"
+ ╚═╝  ╚═╝ ╚════╝ ╚══════ by Ryan Zhang\033[0m"
 
 # os
 upSeconds="\$(cut -d. -f1 /proc/uptime)"
@@ -836,10 +846,10 @@ EOF
 
   timedatectl set-timezone Asia/Shanghai
   chronyd -q -t 1 'server cn.pool.ntp.org iburst maxsamples 1'
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     systemctl enable chrony
     systemctl start chrony
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     systemctl enable chronyd
     systemctl start chronyd
   fi
@@ -849,9 +859,9 @@ EOF
   hwclock --systohc
 
   # package
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y apt-transport-https ca-certificates curl wget gnupg lsb-release
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     [[ "${OFFLINE_TAG:-}" != "1" ]] && ${install_cmd} install -y curl wget
   fi
 
@@ -875,9 +885,9 @@ EOF
   sysctl --system
 
   # audit
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     [[ "${OFFLINE_TAG:-}" != "1" ]] && apt-get install -y auditd audispd-plugins
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     [[ "${OFFLINE_TAG:-}" != "1" ]] && yum install -y audit audit-libs
   fi
 
@@ -943,7 +953,7 @@ function script::upgrade_kernel() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     local codename
     codename="$(awk -F'=' '/UBUNTU_CODENAME/ {print $2}' /etc/os-release)"
 
@@ -952,7 +962,7 @@ function script::upgrade_kernel() {
       apt update
       apt -t "${codename}-backports" install linux-headers-generic linux-image-generic -y
     fi
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     local ver
     ver=$(rpm --eval "%{centos_ver}")
 
@@ -970,36 +980,36 @@ function script::upgrade_kernel() {
   fi
 }
 
-function script::install_kube_component() {
-  local repo="${1:-latest}"
-  local installKubelet="${2:-1}"
-  local installKubectl="${3:-1}"
-  local installKubecni="${4:-1}"
-  echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-  #curl -fsSL https://pkgs.k8s.io/core:/stable:/$repo/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  # 此操作会覆盖 /etc/apt/sources.list.d/kubernetes.list 中现存的所有配置。
-  #echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/'${repo}'/deb/ /' |  tee /etc/apt/sources.list.d/kubernetes.list
-  apt-get update
+# function script::install_kube_component() {
+#   local repo="${1:-latest}"
+#   local installKubelet="${2:-1}"
+#   local installKubectl="${3:-1}"
+#   local installKubecni="${4:-1}"
+#   echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
+#   #curl -fsSL https://pkgs.k8s.io/core:/stable:/$repo/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+#   # 此操作会覆盖 /etc/apt/sources.list.d/kubernetes.list 中现存的所有配置。
+#   #echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/'${repo}'/deb/ /' |  tee /etc/apt/sources.list.d/kubernetes.list
+#   apt-get update
 
-  if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
-    apt-get install -y "kubeadm"
-    if [[ "${installKubelet:-}" == "1" ]]; then
-      [ -f "$(which kubelet)" ] && apt remove -y kubelet
-      apt-get install -y "kubelet"
-    fi
-    if [[ "${installKubectl:-}" == "1" ]]; then
-      [ -f "$(which kubectl)" ] && apt remove -y kubectl
-      apt-get install -y kubectl
-    fi
-    if [[ "${installKubecni:-}" == "1" ]]; then
-      apt-get install -y kubernetes-cni
-    fi
-    #apt-get install -y "kubeadm" "kubelet" "kubectl" kubernetes-cni
+#   if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
+#     [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
+#     apt-get install -y "kubeadm"
+#     if [[ "${installKubelet:-}" == "1" ]]; then
+#       [ -f "$(which kubelet)" ] && apt remove -y kubelet
+#       apt-get install -y "kubelet"
+#     fi
+#     if [[ "${installKubectl:-}" == "1" ]]; then
+#       [ -f "$(which kubectl)" ] && apt remove -y kubectl
+#       apt-get install -y kubectl
+#     fi
+#     if [[ "${installKubecni:-}" == "1" ]]; then
+#       apt-get install -y kubernetes-cni
+#     fi
+#     #apt-get install -y "kubeadm" "kubelet" "kubectl" kubernetes-cni
 
-  fi
+#   fi
 
-}
+# }
 
 function script::upgrage_kube() {
   # 节点软件升级
@@ -1010,7 +1020,7 @@ function script::upgrage_kube() {
 
   repo="${version%-*}"
   repo="${repo//=/}"
-
+  repo=$(echo $repo | awk -F"." '{print $1"."$2}')
   [ "${repo}" == "" ] && repo="1.29"
 
   set -e
@@ -1020,13 +1030,13 @@ function script::upgrage_kube() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt-get update
     [ -f "$(which kubeadm)" ] && apt remove -y kubeadm
     apt-get install -y "kubeadm"
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     yum install -y "kubeadm${version}" --disableexcludes=kubernetes
   fi
@@ -1047,9 +1057,9 @@ function script::upgrage_kube() {
 
   echo '[install] kubelet kubectl'
   kubectl version --client=true
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     apt-get install -y "kubelet" "kubectl" "kubernetes-cni"
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     yum install -y "kubelet" "kubectl" "kubernetes-cni" --disableexcludes=kubernetes
   fi
@@ -1071,7 +1081,7 @@ function script::install_docker() {
   [ -f /etc/os-release ] && source /etc/os-release
   local host_os=${ID:-}
   local install_cmd=""
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
     #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
@@ -1079,7 +1089,7 @@ function script::install_docker() {
     chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
     sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
     ${install_cmd} update
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     cat <<EOF >/etc/yum.repos.d/docker-ce.repo
 [docker-ce-stable]
@@ -1096,7 +1106,7 @@ EOF
     ${install_cmd} install -y "docker-ce${version}" "docker-ce-cli${version}" containerd.io bash-completion
   fi
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     apt-mark hold docker-ce docker-ce-cli containerd.io
   fi
 
@@ -1160,7 +1170,7 @@ function script::install_containerd() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     #wget -qO - http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
     #echo "deb [trusted=yes] http://mirrors.aliyun.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list
@@ -1168,7 +1178,7 @@ function script::install_containerd() {
     chmod a+r /etc/apt/trusted.gpg.d/huawei.gpg
     sudo add-apt-repository "deb [arch=amd64] https://mirrors.huaweicloud.com/docker-ce/linux/ubuntu $(lsb_release -cs) stable"
     ${install_cmd} update
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     cat <<EOF >/etc/yum.repos.d/docker-ce.repo
 [docker-ce-stable]
@@ -1181,9 +1191,11 @@ EOF
   fi
 
   if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-    [ -f "$(which runc)" ] && ${install_cmd} remove -y runc
-    [ -f "$(which containerd)" ] && ${install_cmd} remove -y containerd.io
-    ${install_cmd} install -y containerd.io"${version}" containernetworking bash-completion
+    if [[ "${host_os}" == *"ubuntu"* ]]; then
+      ${install_cmd} install -y containerd.io"${version}" bash-completion
+    elif [[ "${host_os}" == *"centos"* ]]; then
+      ${install_cmd} install -y containerd.io"${version}" containernetworking bash-completion
+    fi
   fi
 
   [ -d /etc/bash_completion.d ] && crictl completion bash >/etc/bash_completion.d/crictl
@@ -1222,7 +1234,7 @@ function script::install_cri-o() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     os="xUbuntu_$(lsb_release -rs)"
 
@@ -1233,7 +1245,7 @@ function script::install_cri-o() {
     wget -qO - "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$os/Release.key" | apt-key add -
 
     apt-get update
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     os="CentOS_$(rpm --eval '%{centos_ver}')" && echo "${os}"
 
@@ -1260,9 +1272,9 @@ EOF
     [ -f "$(which runc)" ] && ${install_cmd} remove -y runc
     [ -f "$(which crio)" ] && ${install_cmd} remove -y cri-o
     [ -f "$(which docker)" ] && ${install_cmd} remove -y docker-ce docker-ce-cli containerd.io
-    if [[ "${host_os}" == "ubuntu" ]]; then
+    if [[ "${host_os}" == *"ubuntu"* ]]; then
       ${install_cmd} install -y cri-o runc bash-completion
-    elif [[ "${host_os}" == "centos" ]]; then
+    elif [[ "${host_os}" == *"centos"* ]]; then
       ${install_cmd} install -y runc cri-o bash-completion --disablerepo=docker-ce-stable || if ! yum install -y runc cri-o bash-completion; then exit 1; fi
     fi
   fi
@@ -1324,12 +1336,13 @@ function script::install_kube() {
 
   repo="${version%-*}"
   repo="${repo//=/}"
+  repo=$(echo $repo | awk -F"." '{print $1"."$2}')
   [ "${repo}" == "" ] && repo="1.29"
   [ -f /etc/os-release ] && source /etc/os-release
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
     echo "deb [trusted=yes] https://pkgs.k8s.io/core:/stable:/v${repo}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt-get update
@@ -1340,7 +1353,7 @@ function script::install_kube() {
       ${install_cmd} install -y "kubeadm" "kubelet" "kubectl" kubernetes-cni
       apt-mark hold kubelet kubeadm kubectl
     fi
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     cat <<EOF >/etc/yum.repos.d/kubernetes.repo
 [kubernetes]
@@ -1352,10 +1365,10 @@ gpgkey=https://pkgs.k8s.io/core:/stable:/v${repo}/rpm/repodata/repomd.xml.key
 exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
 EOF
     if [[ "${OFFLINE_TAG:-}" != "1" ]]; then
-      [ -f /usr/bin/kubeadm ] && yum remove -y kubeadm
-      [ -f /usr/bin/kubelet ] && yum remove -y kubelet
-      [ -f /usr/bin/kubectl ] && yum remove -y kubectl
-      yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+      [ -f /usr/bin/kubeadm ] && ${install_cmd} remove -y kubeadm
+      [ -f /usr/bin/kubelet ] && ${install_cmd} remove -y kubelet
+      [ -f /usr/bin/kubectl ] && ${install_cmd} remove -y kubectl
+      ${install_cmd} install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
     fi
   fi
 
@@ -1388,10 +1401,10 @@ function script::install_haproxy() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
 
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
   fi
 
@@ -1465,10 +1478,10 @@ function check::command_exists() {
   local host_os=${ID:-}
   local install_cmd=""
 
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt-get"
 
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
   fi
 
@@ -1524,7 +1537,7 @@ function get::os() {
   if [[ "${host}"!="" ]]; then
     command::exec "${host}" "
         [ -f /etc/os-release ] && source /etc/os-release
-        echo \${ID:-}
+        echo \${ID:-}\${VERSION_ID:-}
       "
   else
     [ -f /etc/os-release ] && source /etc/os-release
@@ -1618,10 +1631,8 @@ function install::package() {
   fi
 
   for host in $MASTER_NODES $WORKER_NODES; do
-    get::os $host
-    local host_os="${COMMAND_OUTPUT}"
     # install cri
-    log::info "[install]" "install ${KUBE_CRI} on $host, os is $host_os"
+    log::info "[install]" "install ${KUBE_CRI} on $host"
     command::exec "${host}" "
       export OFFLINE_TAG=${OFFLINE_TAG:-0}
       $(declare -f script::install_"${KUBE_CRI}")
@@ -1966,7 +1977,13 @@ function init::add_node() {
     master_index=$((master_index + 1))
     local i=$master_index
     for host in $MASTER_NODES; do
-      add_node_hosts="${add_node_hosts}\n${host:-} ${HOSTNAME_PREFIX}-master-node${i}"
+      if [[ "${RENAME_NODES:-}" == "1" ]]; then
+        node_name=${HOSTNAME_PREFIX}-master-node${i}
+      else
+        command::exec "${host}" "hostnamectl --static"
+        node_name="${COMMAND_OUTPUT}"
+      fi
+      add_node_hosts="${add_node_hosts}\n${host:-} ${node_name}"
       i=$((i + 1))
     done
   fi
@@ -1979,7 +1996,13 @@ function init::add_node() {
     worker_index=$((worker_index + 1))
     local i=$worker_index
     for host in $WORKER_NODES; do
-      add_node_hosts="${add_node_hosts}\n${host:-} ${HOSTNAME_PREFIX}-worker-node${i}"
+      if [[ "${RENAME_NODES:-}" == "1" ]]; then
+        node_name=${HOSTNAME_PREFIX}-worker-node${i}
+      else
+        command::exec "${host}" "hostnamectl --static"
+        node_name="${COMMAND_OUTPUT}"
+      fi
+      add_node_hosts="${add_node_hosts}\n${host:-} ${node_name}"
       i=$((i + 1))
     done
   fi
@@ -2000,7 +2023,7 @@ function kubeadm::init() {
 
   log::info "[kubeadm init]" "kubeadm init on ${MGMT_NODE}"
   log::info "[kubeadm init]" "${MGMT_NODE}: set kubeadmcfg.yaml"
-  kubernetes_ver=$(kubeadm version | sed 's/,/\n/g' | grep "GitVersion" | sed 's/:/\n/g' | sed '1d' | sed 's/}//g')
+  #kubernetes_ver=$(kubeadm version | sed 's/,/\n/g' | grep "GitVersion" | sed 's/:/\n/g' | sed '1d' | sed 's/}//g')
 
   command::exec "${MGMT_NODE}" "
     PAUSE_VERSION=$(kubeadm config images list 2>/dev/null | awk -F: '/pause/ {print $2}')
@@ -2009,6 +2032,8 @@ function kubeadm::init() {
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 ${kubelet_nodeRegistration}
+localAPIEndpoint:
+  advertiseAddress: "${MGMT_NODE}"
 ---
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
@@ -2065,7 +2090,7 @@ enforceNodeAllocatable:
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
-kubernetesVersion: $kubernetes_ver
+kubernetesVersion: ${KUBE_VERSION}
 controlPlaneEndpoint: $KUBE_APISERVER:6443
 networking:
   dnsDomain: $KUBE_DNSDOMAIN
@@ -2190,8 +2215,12 @@ function kubeadm::join() {
     command::exec "${host}" "
       cat << EOF > /etc/kubernetes/kubeadmcfg.yaml
 ---
-apiVersion: kubeadm.k8s.io/v1beta2
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: JoinConfiguration
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: "${host}"
+    bindPort: 6443
 discovery:
   bootstrapToken:
     apiServerEndpoint: $KUBE_APISERVER:6443
@@ -2223,9 +2252,11 @@ EOF
     log::info "[kubeadm join]" "worker $host join cluster."
     command::exec "${host}" "
       mkdir -p /etc/kubernetes/manifests
+      mkdir -p /run/systemd/resolve
+      ln -s /etc/resolv.conf /run/systemd/resolve/resolv.conf 
       cat << EOF > /etc/kubernetes/kubeadmcfg.yaml
 ---
-apiVersion: kubeadm.k8s.io/v1beta2
+apiVersion: kubeadm.k8s.io/v1beta3
 kind: JoinConfiguration
 discovery:
   bootstrapToken:
@@ -2342,7 +2373,7 @@ function config::haproxy_backend() {
       $(echo -ne "${action_cmd}")
       haproxy -c -f /etc/haproxy/haproxy.cfg && systemctl reload haproxy
     "
-    check::exit_code "$?" "config" "worker ${host}: ${action} apiserver(${m}) from haproxy"
+    check::exit_code "$?" "config" "worker ${host}: ${action} apiserver from haproxy"
   done
 }
 
@@ -2763,8 +2794,8 @@ function add::network() {
     CILIUM_CLI_VERSION=$(curl -s "${GITHUB_PROXY}https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt")
     CLI_ARCH=amd64
     if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
-    utils::download_file "${GITHUB_PROXY}https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" "${OFFLINE_DIR}/cilium-linux-${CLI_ARCH}.tar.gz"
-    tar xzvfC "${OFFLINE_DIR}/cilium-linux-${CLI_ARCH}.tar.gz" /usr/local/bin
+    utils::download_file "${GITHUB_PROXY}https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" "${OFFLINE_DIR}/manifests/cilium-linux-${CLI_ARCH}.tar.gz"
+    tar xzvfC "${OFFLINE_DIR}/manifests/cilium-linux-${CLI_ARCH}.tar.gz" /usr/local/bin
     [ -d /etc/bash_completion.d ] && cilium completion bash >/etc/bash_completion.d/cilium
     cilium install --version "${CILIUM_VERSION}" \
       --set ipam.mode=cluster-pool \
@@ -2845,7 +2876,71 @@ function add::addon() {
     check::exit_code "$?" "addon" "change nodelocaldns parameter"
     kube::apply "${nodelocaldns_file}"
     kube::wait "node-local-dns" "kube-system" "pod" "k8s-app=node-local-dns"
+  elif [[ "$KUBE_ADDON" == "certmanager" ]]; then
+    log::info "[addon]" "download certmanager manifests"
+    local certmanager_file="${OFFLINE_DIR}/manifests/cert-manager.yml"
+    utils::download_file "${GITHUB_PROXY}https://github.com/cert-manager/cert-manager/releases/download/v${CERT_MANAGER_VERSION}/cert-manager.yaml" "${certmanager_file}"
+    kube::apply "${certmanager_file}"
+    kube::wait "cert-manager" "cert-manager" "pod" "app=cert-manager"
+  elif [[ "$KUBE_ADDON" == "aliyuncert" ]]; then 
+     # Install alidns-webhook to cert-manager namespace. 
+    log::info "[addon]" "download alidns-webhook manifests"
+    local alidns_webhook_file="${OFFLINE_DIR}/manifests/alidns-webhook.yaml"
+    utils::download_file "${GITHUB_PROXY}https://raw.githubusercontent.com/pragkent/alidns-webhook/master/deploy/bundle.yaml"  "${alidns_webhook_file}"
+    command::exec "${MGMT_NODE}" "sed -i -e \"s/acme.yourcompany.com/acme.${SELF_DOMAIN_NAME}/g\" \"${alidns_webhook_file}\"  "  
+    kube::apply "${alidns_webhook_file}"
+    kube::wait "alidns-webhook" "cert-manager" "pod" "app=alidns-webhook"
+    local domain_crt=$(echo -n ${SELF_DOMAIN_NAME} | sed 's/[.]/-/g')
+    kube::apply "Create alidns-secret,letsencrypt ClusterIssuer and apply certs for ${SELF_DOMAIN_NAME} " "
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alidns-secret
+  namespace: cert-manager
+data:
+  access-key: ${ALIDNS_ACCESS_KEY}
+  secret-key: ${ALIDNS_SECRET_KEY}
 
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-${domain_crt}
+spec:
+  acme:
+    # Change to your letsencrypt email
+    email: rainbow954@163.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-${domain_crt}-account-key
+    solvers:
+    - dns01:
+        webhook:
+          groupName: acme.${SELF_DOMAIN_NAME}
+          solverName: alidns
+          config:
+            region: ""
+            accessKeySecretRef:
+              name: alidns-secret
+              key: access-key
+            secretKeySecretRef:
+              name: alidns-secret
+              key: secret-key 
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${domain_crt}-tls
+spec:
+  secretName: ${domain_crt}-tls
+  dnsNames: #dnsNames 指示该证书的可以用于哪些域名
+  - '${SELF_DOMAIN_NAME}'  
+  - '*.${SELF_DOMAIN_NAME}'
+  issuerRef:
+    name: letsencrypt-${domain_crt}
+    kind: ClusterIssuer            
+    "
   else
     log::warning "[addon]" "No $KUBE_ADDON config."
   fi
@@ -3338,13 +3433,12 @@ function add::storage() {
       log::info "[storage]" "${host}: install iscsi-initiator-utils"
       command::exec "${host}" "
           [ -f /etc/os-release ] && source /etc/os-release   
-          local host_os=${ID:-}
+          local host_os=\${ID:-}
           local install_cmd=""
-
-          if [[ "${host_os}" == "ubuntu" ]]; then
+          if [[ \"${host_os}\" ==  *\"ubuntu\"* ]]; then
             install_cmd="apt-get"
             apt-get install -y open-iscsi
-          elif [[ "${host_os}" == "centos" ]]; then
+          elif [[ \"${host_os}\" ==  *\"centos\"* ]]; then
             install_cmd="yum"
             yum install -y iscsi-initiator-utils
           fi
@@ -3664,15 +3758,15 @@ function reset::node() {
   # 重置节点
   local host=$1
   get::os $host
-  local host_os="$COMMAND_OUTPUT"
+  get::command_output "host_os" "$?" "exit"
   local install_cmd=""
   local remove_repo_script=""
   log::info "[reset]" "node $host,os:$host_os"
-  if [[ "${host_os}" == "ubuntu" ]]; then
+  if [[ "${host_os}" == *"ubuntu"* ]]; then
     install_cmd="apt"
     remove_repo_script="
     "
-  elif [[ "${host_os}" == "centos" ]]; then
+  elif [[ "${host_os}" == *"centos"* ]]; then
     install_cmd="yum"
     remove_repo_script="
     for repo in kubernetes.repo docker-ce.repo devel_kubic_libcontainers_stable.repo
@@ -3744,52 +3838,67 @@ function offline::load() {
     hosts="${MASTER_NODES}"
   elif [[ "${role}" == "worker" ]]; then
     hosts="${WORKER_NODES}"
+  elif [[ "${role}" == "mgmt" ]]; then
+    hosts="${MGMT_NODE}"
   fi
 
   for host in ${hosts}; do
     log::info "[offline]" "${role} ${host}: load offline file"
+    get::os $host
+    get::command_output "host_os" "$?" "exit"
+    local offline_tgz="${OFFLINE_FILE}/${KUBE_VERSION}/${KUBE_VERSION}_${host_os}.tgz"
+    [ ! -f "${offline_tgz}" ] && {
+      log::error "[offline tgz file]" "not found ${offline_tgz}"
+      exit 1
+    }
+    log::info "[offline]" "${role} ${host}: scp offline tgz file:${offline_tgz} to ${host}:${OFFLINE_DIR}"
+
     command::exec "${host}" "[[ ! -d \"${OFFLINE_DIR}\" ]] && { mkdir -pv \"${OFFLINE_DIR}\"; chmod 777 \"${OFFLINE_DIR}\"; } ||:"
     check::exit_code "$?" "offline" "$host: mkdir offline dir" "exit"
+    command::scp "${host}" "${offline_tgz}" "${OFFLINE_DIR}"
+    check::exit_code "$?" "offline" "scp ${offline_tgz} to $host:${OFFLINE_DIR}" "exit"
+    command::exec "${host}" "tar zxf ${OFFLINE_DIR}/${KUBE_VERSION}_${host_os}.tgz -C ${OFFLINE_DIR}/"
+    check::exit_code "$?" "offline" "tar zxf ${OFFLINE_DIR}/${KUBE_VERSION}_${host_os}.tgz -C ${OFFLINE_DIR}/" "exit"
 
-    if [[ "${UPGRADE_KERNEL_TAG:-}" == "1" ]]; then
-      command::scp "${host}" "${TMP_DIR}/packages/kernel/*" "${OFFLINE_DIR}"
-      check::exit_code "$?" "offline" "scp kernel file to $host" "exit"
-    else
-      log::info "[offline]" "${role} ${host}: copy offline file"
-      command::scp "${host}" "${TMP_DIR}/packages/kubeadm/*" "${OFFLINE_DIR}"
-      check::exit_code "$?" "offline" "scp kube file to $host" "exit"
-      command::scp "${host}" "${TMP_DIR}/packages/all/*" "${OFFLINE_DIR}"
-      check::exit_code "$?" "offline" "scp all file to $host" "exit"
+    if [[ "${role}" != "mgmt" ]]; then
+      if [[ "${UPGRADE_KERNEL_TAG:-}" == "1" ]]; then
+        command::exec "${host}" "mv ${OFFLINE_DIR}/packages/kernel/* ${OFFLINE_DIR}/"
+        check::exit_code "$?" "offline" "cp kernel file to $host" "exit"
+      else
+        log::info "[offline]" "${role} ${host}: copy offline file"
+        #command::scp "${host}" "${TMP_DIR}/packages/kubeadm/*" "${OFFLINE_DIR}"
+        command::exec "${host}" "
+          mv ${OFFLINE_DIR}/packages/kubeadm/* ${OFFLINE_DIR}/
+          mv ${OFFLINE_DIR}/packages/all/* ${OFFLINE_DIR}/
+          mv ${OFFLINE_DIR}/images/${role}.tgz ${OFFLINE_DIR}/
+          mv ${OFFLINE_DIR}/images/all.tgz ${OFFLINE_DIR}/
+        "
+        check::exit_code "$?" "offline" "cp all file to $host" "exit"
 
-      if [[ "${role}" == "worker" ]]; then
-        command::scp "${host}" "${TMP_DIR}/packages/worker/*" "${OFFLINE_DIR}"
-        check::exit_code "$?" "offline" "scp worker file to $host" "exit"
+        if [[ "${role}" == "worker" ]]; then
+          command::exec "${host}" "mv ${OFFLINE_DIR}/packages/worker/* ${OFFLINE_DIR}/"
+          check::exit_code "$?" "offline" "cp worker file to $host" "exit"
+        fi
       fi
 
-      command::scp "${host}" "${TMP_DIR}/images/${role}.tgz" "${OFFLINE_DIR}"
-      check::exit_code "$?" "offline" "scp ${role} images to $host" "exit"
-      command::scp "${host}" "${TMP_DIR}/images/all.tgz" "${OFFLINE_DIR}"
-      check::exit_code "$?" "offline" "scp all images to $host" "exit"
-    fi
-
-    log::info "[offline]" "${role} ${host}: install package"
-    command::exec "${host}" "
+      log::info "[offline]" "${role} ${host}: install package"
+      command::exec "${host}" "
         [ -f /etc/os-release ] && source /etc/os-release   
-        local host_os=${ID:-}
+        local host_os=\${ID:-}
         local install_cmd=""
 
-        if [[ "${host_os}" == "ubuntu" ]]; then
+        if [[ \"${host_os}\" == *\"ubuntu\"* ]]; then
           install_cmd="apt-get"
           dpkg --force-all -i ${OFFLINE_DIR}/*.deb; DEBIAN_FRONTEND=noninteractive apt-get install -f -q -y
-        elif [[ "${host_os}" == "centos" ]]; then
+        elif [[ \"${host_os}\" == *\"centos\"* ]]; then
           install_cmd="yum"
           yum localinstall -y --skip-broken ${OFFLINE_DIR}/*.rpm
         fi
-    "
-    check::exit_code "$?" "offline" "${role} ${host}: install package" "exit"
+      "
+      check::exit_code "$?" "offline" "${role} ${host}: install package" "exit"
 
-    if [[ "${UPGRADE_KERNEL_TAG:-}" != "1" ]]; then
-      command::exec "${host}" "
+      if [[ "${UPGRADE_KERNEL_TAG:-}" != "1" ]]; then
+        command::exec "${host}" "
         set -e
         for target in firewalld python-firewall firewalld-filesystem iptables; do
           systemctl stop \$target &>/dev/null || true
@@ -3799,33 +3908,42 @@ function offline::load() {
         cd ${OFFLINE_DIR} && \
         gzip -d -c ${1}.tgz | docker load && gzip -d -c all.tgz | docker load
       "
-      check::exit_code "$?" "offline" "$host: load images" "exit"
+        check::exit_code "$?" "offline" "$host: load images" "exit"
+      fi
+      command::exec "${host}" "rm -rf ${OFFLINE_DIR:-/tmp/abc}"
+      check::exit_code "$?" "offline" "$host: clean offline file"
     fi
-    command::exec "${host}" "rm -rf ${OFFLINE_DIR:-/tmp/abc}"
-    check::exit_code "$?" "offline" "$host: clean offline file"
   done
 
-  command::scp "${MGMT_NODE}" "${TMP_DIR}/manifests" "${OFFLINE_DIR}"
-  check::exit_code "$?" "offline" "scp manifests file to ${MGMT_NODE}" "exit"
+  # log::info "[offline]" "MGMT_NODE:${MGMT_NODE}: copy manifests/bins offline file"
+  # command::exec "${MGMT_NODE}" "
+  #       mv ${OFFLINE_DIR}/manifests ${OFFLINE_DIR}/
+  #       mv ${OFFLINE_DIR}/bins ${OFFLINE_DIR}/
+  #     "
+  # check::exit_code "$?" "offline" "cp manifests/bins file to $MGMT_NODE" "exit"
 
-  command::scp "${MGMT_NODE}" "${TMP_DIR}/bins" "${OFFLINE_DIR}"
-  check::exit_code "$?" "offline" "scp bins file to ${MGMT_NODE}" "exit"
+  #command::scp "${MGMT_NODE}" "${TMP_DIR}/manifests" "${OFFLINE_DIR}"
+  #check::exit_code "$?" "offline" "scp manifests file to ${MGMT_NODE}" "exit"
+
+  #command::scp "${MGMT_NODE}" "${TMP_DIR}/bins" "${OFFLINE_DIR}"
+  #check::exit_code "$?" "offline" "scp bins file to ${MGMT_NODE}" "exit"
 }
 
 function offline::cluster() {
   # 集群节点加载离线包
 
-  [ ! -f "${OFFLINE_FILE}" ] && {
-    log::error "[offline]" "not found ${OFFLINE_FILE}"
+  [ ! -d "${OFFLINE_FILE}" ] && {
+    log::error "[offline folder]" "not found ${OFFLINE_FILE}"
     exit 1
   }
 
-  log::info "[offline]" "Unzip offline package on local."
-  tar zxf "${OFFLINE_FILE}" -C "${TMP_DIR}/"
-  check::exit_code "$?" "offline" "Unzip offline package"
+  #log::info "[offline]" "Unzip offline package on local."
+  #tar zxf "${OFFLINE_FILE}" -C "${TMP_DIR}/"
+  #check::exit_code "$?" "offline" "Unzip offline package"
 
   offline::load "master"
   offline::load "worker"
+  offline::load "mgmt"
 }
 
 function init::cluster() {
@@ -4057,7 +4175,7 @@ function transform::data {
   criSocket: ${KUBE_CRI_ENDPOINT:-/run/containerd/containerd.sock}
   kubeletExtraArgs:
     runtime-cgroups: /system.slice/${KUBE_CRI//-/}.service
-    pod-infra-container-image: ${KUBE_IMAGE_REPO}/pause:${PAUSE_VERSION:-3.7}
+    pod-infra-container-image: ${KUBE_IMAGE_REPO}/pause:${PAUSE_VERSION:-3.9}
 "
 }
 
@@ -4073,8 +4191,14 @@ function transform::nodes {
     if [[ "${value:-}" != "" ]]; then
       MASTER_NODES_MAP["$key"]="$value"
     fi
-    MASTER_NODES_IP="$MASTER_NODES_IP  $key"
-  done <<<"$(echo "$MASTER_NODES" | tr ',' '\n' | tr ':' ' ')"
+    if [[ "${key:-}" != "" ]]; then
+       if [[ "${MASTER_NODES_IP:-}" != "" ]]; then
+          MASTER_NODES_IP="$key $MASTER_NODES_IP"
+       else
+          MASTER_NODES_IP="$key"    
+       fi 
+    fi 
+  done <<<"$(echo "$MASTER_NODES" | tr ' ' '\n' | tr ':' ' ')"
 
   # 使用read命令和while循环进行拆分
   local WORKER_NODES_IP=""
@@ -4082,16 +4206,22 @@ function transform::nodes {
     if [[ "${value:-}" != "" ]]; then
       WORKER_NODES_MAP["$key"]="$value"
     fi
-    WORKER_NODES_IP="$WORKER_NODES_IP  $key"
-  done <<<"$(echo "$WORKER_NODES" | tr ',' '\n' | tr ':' ' ')"
+    if [[ "${key:-}" != "" ]]; then
+       if [[ "${WORKER_NODES_IP:-}" != "" ]]; then
+          WORKER_NODES_IP="$key $WORKER_NODES_IP"
+       else
+          WORKER_NODES_IP="$key"    
+       fi 
+    fi
+  done <<<"$(echo "$WORKER_NODES" | tr ' ' '\n' | tr ':' ' ')"
 
   # 打印结果
   for key in "${!MASTER_NODES_MAP[@]}"; do
-    echo "$key -> ${MASTER_NODES_MAP[$key]}"
+    echo "master: $key -> ${MASTER_NODES_MAP[$key]}"
   done
   # 打印结果
   for key in "${!WORKER_NODES_MAP[@]}"; do
-    echo "$key -> ${WORKER_NODES_MAP[$key]}"
+    echo "worker: $key -> ${WORKER_NODES_MAP[$key]}"
   done
 
   MASTER_NODES=${MASTER_NODES_IP}
@@ -4129,7 +4259,7 @@ Flag:
   -n,--network         cluster network, choose: [flannel,calico,cilium], default: ${KUBE_NETWORK}
   -i,--ingress         ingress controller, choose: [nginx,traefik], default: ${KUBE_INGRESS}
   -ui,--ui             cluster web ui, choose: [dashboard,kubesphere], default: ${KUBE_UI}
-  -a,--addon           cluster add-ons, choose: [metrics-server,nodelocaldns], default: ${KUBE_ADDON}
+  -a,--addon           cluster add-ons, choose: [metrics-server,nodelocaldns,certmanager], default: ${KUBE_ADDON}
   -M,--monitor         cluster monitor, choose: [prometheus]
   -l,--log             cluster log, choose: [elasticsearch]
   -s,--storage         cluster storage, choose: [rook,longhorn]
@@ -4301,6 +4431,11 @@ while [ "${1:-}" != "" ]; do
     ADDON_TAG=1
     KUBE_ADDON=${1:-$KUBE_ADDON}
     ;;
+  -d | --domain)
+    shift
+    ADDON_TAG=1
+    SELF_DOMAIN_NAME=${1:-$SELF_DOMAIN_NAME}
+    ;;    
   --cri)
     shift
     KUBE_CRI=${1:-$KUBE_CRI}
@@ -4346,13 +4481,15 @@ log::info "[start]" "bash $0 ${SCRIPT_PARAMETER//${SSH_PASSWORD:-${SUDO_PASSWORD
 # 数据处理
 transform::data
 
+# node inof transfer
+transform::nodes
+
 # 预检
 check::preflight
 
 # 动作
 if [[ "${INIT_TAG:-}" == "1" ]]; then
   [[ "$MASTER_NODES" == "" ]] && MASTER_NODES="127.0.0.1"
-  # script::install_kube $KUBE_VERSION
   init::cluster
 elif [[ "${ADD_TAG:-}" == "1" ]]; then
   [[ "${NETWORK_TAG:-}" == "1" ]] && {
